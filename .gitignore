@@ -1,0 +1,7 @@
+build/
+cmake-build-*/
+results/
+.DS_Store
+.vscode/
+.idea/
+__pycache__/

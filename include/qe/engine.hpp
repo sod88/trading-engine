@@ -7,8 +7,10 @@
 //   2. the portfolio marks positions to this bar's close
 //   3. the strategy sees the closed bar and may submit orders
 //   4. orders pass the portfolio's risk check and go to the broker
-//   5. the equity curve records this bar
-// Because orders created in step 3 can only fill in step 1 of the next bar,
+//   5. the equity curve records the day, once every symbol's bar for that
+//      date has been processed
+// With several symbols the feed hands out one bar per symbol per date, in
+// date order. Because orders created in step 3 can only fill in step 1 of the next bar,
 // a strategy can never trade on a price it hasn't seen yet.
 
 #include <cstddef>
@@ -39,6 +41,7 @@ private:
     void handle(const MarketEvent& e);
     void handle(const OrderEvent& e);
     void handle(const FillEvent& e);
+    double reserved_cash() const;
 
     // StrategyContext
     long position(const std::string& symbol) const override { return portfolio_.position(symbol); }
@@ -54,6 +57,7 @@ private:
     bool verbose_ = false;
     std::size_t bars_ = 0;
     std::size_t rejected_ = 0;
+    std::string current_date_;
 };
 
 }  // namespace qe

@@ -8,7 +8,7 @@ Portfolio::Portfolio(double initial_cash) : initial_cash_(initial_cash), cash_(i
     if (initial_cash <= 0) throw std::invalid_argument("initial cash must be positive");
 }
 
-std::optional<std::string> Portfolio::check(const Order& order) const {
+std::optional<std::string> Portfolio::check(const Order& order, double reserved_cash) const {
     if (order.quantity <= 0) return "quantity must be positive";
 
     auto price_it = last_price_.find(order.symbol);
@@ -16,7 +16,7 @@ std::optional<std::string> Portfolio::check(const Order& order) const {
 
     if (order.side == Side::Buy) {
         const double estimated_cost = static_cast<double>(order.quantity) * price_it->second;
-        if (estimated_cost > cash_) return "insufficient cash";
+        if (estimated_cost > cash_ - reserved_cash) return "insufficient cash";
     } else {
         if (order.quantity > position(order.symbol)) return "short selling is not allowed";
     }
@@ -65,6 +65,12 @@ double Portfolio::equity() const {
         value += static_cast<double>(pos.quantity) * price;
     }
     return value;
+}
+
+std::optional<double> Portfolio::last_price(const std::string& symbol) const {
+    auto it = last_price_.find(symbol);
+    if (it == last_price_.end()) return std::nullopt;
+    return it->second;
 }
 
 long Portfolio::position(const std::string& symbol) const {

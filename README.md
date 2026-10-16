@@ -12,10 +12,13 @@ ctest --test-dir build --output-on-failure     # or ./build/qe_tests
 
 ./build/backtest data/sample.csv
 ./build/backtest data/sample.csv --fast 10 --slow 30 --verbose
+./build/backtest data/SPY.csv data/QQQ.csv data/TLT.csv   # several symbols
 ```
 
 On Windows with Visual Studio the executables land in `build\Release\`.
 
+Pass one CSV per symbol. Each symbol is named after its file (`SPY.csv` ->
+`SPY`); `--symbol NAME` overrides that when there is a single file.
 Options: `--symbol NAME`, `--fast N`, `--slow N`, `--cash AMOUNT`,
 `--commission PER_SHARE`, `--slippage-bps BPS`, `--out DIR`, `--verbose`.
 Each run writes `equity.csv` and `trades.csv` to the output directory
@@ -25,14 +28,25 @@ Each run writes `equity.csv` and `trades.csv` to the output directory
 
 `data/sample.csv` is **synthetic** (regime-switching random walk, made by
 `tools/generate_sample_data.py`). It exists to test the plumbing, not to
-judge strategies. For real data, download daily history for any ticker from
-Yahoo Finance as CSV and run:
+judge strategies.
+
+For real data, download daily history from Yahoo Finance (Python 3, no
+packages needed):
 
 ```bash
-./build/backtest ~/Downloads/SPY.csv --symbol SPY
+python3 tools/fetch_data.py SPY QQQ TLT --start 2010-01-01   # writes data/SPY.csv ...
+./build/backtest data/SPY.csv data/QQQ.csv data/TLT.csv
 ```
 
-The loader matches columns by name, skips `null` rows and sorts by date.
+A CSV saved by hand from the Yahoo Finance website works too. Downloaded
+files stay out of git (see `.gitignore`); only the sample is committed.
+
+The loader matches columns by name, skips `null` rows and sorts by date. When
+the file has an `Adj Close` column, prices are adjusted with it so dividends
+and splits don't look like crashes.
+
+With several symbols, the bars are merged by date and the equity curve gets
+one point per trading day. Symbols don't need identical calendars.
 
 ## How it works
 
@@ -58,7 +72,7 @@ explicitly.
 | File | Role |
 |---|---|
 | `include/qe/event.hpp` | `Bar`, `Order`, `Fill` and the event variant |
-| `include/qe/data_feed.hpp`, `src/data_feed.cpp` | data feeds and the CSV loader |
+| `include/qe/data_feed.hpp`, `src/data_feed.cpp` | data feeds, the CSV loader, merging symbols |
 | `include/qe/strategy.hpp` | `Strategy` and `StrategyContext` interfaces |
 | `include/qe/strategies/sma_crossover.hpp` | the sample strategy |
 | `include/qe/indicators.hpp` | incremental indicators (`RollingMean`) |
@@ -81,11 +95,16 @@ public:
 };
 ```
 
-Then swap it in for `SmaCrossover` in `app/main.cpp`.
+Strategies receive every symbol's bars through the same `on_bar`, so keep
+any per-symbol state keyed by `bar.symbol` (see `SmaCrossover`). Then swap it
+in for `SmaCrossover` in `app/main.cpp`.
 
 ## Phase 1 limitations (on purpose)
 
-- Single symbol, daily bars, market orders only, long-only.
+- Daily bars, market orders only, long-only.
+- With several symbols the sample strategy gives each an equal slice of
+  equity, and the buy & hold benchmark is an equal-weight average of each
+  symbol's own return over its history.
 - Orders are sized from the close and filled at the next open, so a large
   overnight gap can push cash slightly negative. The strategy keeps 5% in
   reserve to make this rare.

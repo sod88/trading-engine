@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -71,6 +72,8 @@ std::vector<Bar> load_csv(const std::string& path, const std::string& symbol) {
     const std::size_t c_close = require("close");
     const bool has_volume = col.count("volume") > 0;
     const std::size_t c_volume = has_volume ? col["volume"] : 0;
+    const bool has_adj = col.count("adj close") > 0;
+    const std::size_t c_adj = has_adj ? col["adj close"] : 0;
 
     std::vector<Bar> bars;
     std::size_t skipped = 0;
@@ -95,6 +98,18 @@ std::vector<Bar> load_csv(const std::string& path, const std::string& symbol) {
         bar.low = *l;
         bar.close = *c;
         bar.volume = has_volume ? get(c_volume).value_or(0.0) : 0.0;
+        if (has_adj) {
+            auto adj = get(c_adj);
+            if (!adj || *adj <= 0 || bar.close <= 0) {
+                ++skipped;
+                continue;
+            }
+            const double factor = *adj / bar.close;
+            bar.open *= factor;
+            bar.high *= factor;
+            bar.low *= factor;
+            bar.close = *adj;
+        }
         if (bar.open <= 0 || bar.close <= 0 || bar.high < bar.low) {
             ++skipped;
             continue;
@@ -113,6 +128,28 @@ std::vector<Bar> load_csv(const std::string& path, const std::string& symbol) {
                   << "\n";
     if (bars.empty()) throw std::runtime_error("no valid bars in " + path);
     return bars;
+}
+
+std::string symbol_from_path(const std::string& path) {
+    std::string stem = std::filesystem::path(path).stem().string();
+    std::transform(stem.begin(), stem.end(), stem.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return stem;
+}
+
+std::vector<Bar> merge_series(std::vector<std::vector<Bar>> series) {
+    std::vector<Bar> all;
+    for (auto& s : series) {
+        for (auto& b : s) all.push_back(std::move(b));
+    }
+    std::stable_sort(all.begin(), all.end(), [](const Bar& a, const Bar& b) {
+        return a.date != b.date ? a.date < b.date : a.symbol < b.symbol;
+    });
+    for (std::size_t i = 1; i < all.size(); ++i) {
+        if (all[i].date == all[i - 1].date && all[i].symbol == all[i - 1].symbol)
+            throw std::runtime_error("symbol " + all[i].symbol + " appears twice on " + all[i].date);
+    }
+    return all;
 }
 
 }  // namespace qe

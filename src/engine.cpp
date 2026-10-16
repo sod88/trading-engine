@@ -7,6 +7,9 @@ namespace qe {
 
 void Backtester::run() {
     while (auto bar = feed_.next()) {
+        // A new date means every bar of the previous one is in: record it.
+        if (!current_date_.empty() && bar->date != current_date_) portfolio_.record(current_date_);
+        current_date_ = bar->date;
         queue_.push(MarketEvent{*bar});
         while (!queue_.empty()) {
             Event event = std::move(queue_.front());
@@ -14,6 +17,7 @@ void Backtester::run() {
             dispatch(event);
         }
     }
+    if (!current_date_.empty()) portfolio_.record(current_date_);
 }
 
 void Backtester::dispatch(const Event& event) {
@@ -27,12 +31,11 @@ void Backtester::handle(const MarketEvent& e) {
     for (const Fill& fill : broker_.on_bar(bar)) handle(FillEvent{fill});
     portfolio_.update_price(bar.symbol, bar.close);
     strategy_.on_bar(bar, *this);
-    portfolio_.record(bar.date);
     ++bars_;
 }
 
 void Backtester::handle(const OrderEvent& e) {
-    if (auto reason = portfolio_.check(e.order)) {
+    if (auto reason = portfolio_.check(e.order, reserved_cash())) {
         ++rejected_;
         if (verbose_)
             std::cout << e.order.created_date << "  REJECTED " << to_string(e.order.side) << ' '
@@ -40,6 +43,16 @@ void Backtester::handle(const OrderEvent& e) {
         return;
     }
     broker_.submit(e.order);
+}
+
+// Estimated cost of buy orders still waiting at the broker.
+double Backtester::reserved_cash() const {
+    double reserved = 0.0;
+    for (const Order& o : broker_.pending_orders()) {
+        if (o.side != Side::Buy) continue;
+        if (auto price = portfolio_.last_price(o.symbol)) reserved += static_cast<double>(o.quantity) * *price;
+    }
+    return reserved;
 }
 
 void Backtester::handle(const FillEvent& e) {

@@ -32,7 +32,9 @@ public:
     // Pre-trade risk check. Returns a rejection reason, or nullopt if allowed.
     // Phase 1 rules: positive quantity, a known price, no shorting, and no
     // buying with money you don't have (estimated at the last close).
-    std::optional<std::string> check(const Order& order) const;
+    // `reserved_cash` is money already promised to buy orders that haven't
+    // filled yet, so several buys on the same day can't overspend together.
+    std::optional<std::string> check(const Order& order, double reserved_cash = 0.0) const;
 
     void on_fill(const Fill& fill);
     void update_price(const std::string& symbol, double price);
@@ -41,6 +43,7 @@ public:
     double initial_cash() const { return initial_cash_; }
     double cash() const { return cash_; }
     double equity() const;
+    std::optional<double> last_price(const std::string& symbol) const;
     long position(const std::string& symbol) const;
     double realized_pnl() const { return realized_pnl_; }
     double total_commission() const { return total_commission_; }

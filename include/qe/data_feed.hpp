@@ -42,6 +42,17 @@ private:
 // Required: date, open, high, low, close. Optional: volume.
 // Rows with missing values ("null", empty) are skipped. Bars are sorted by
 // date; duplicate dates throw.
+// If an "Adj Close" column is present, open/high/low/close are scaled by
+// adj_close / close so that dividends and splits don't show up as price
+// jumps. Prices are then comparable across the whole history.
 std::vector<Bar> load_csv(const std::string& path, const std::string& symbol);
+
+// Default symbol for a data file: its name without directory or extension,
+// upper-cased ("data/spy.csv" -> "SPY").
+std::string symbol_from_path(const std::string& path);
+
+// Combines several symbols' histories into one stream ordered by date, then
+// symbol, ready for BarSeriesFeed. Symbols may trade on different days.
+std::vector<Bar> merge_series(std::vector<std::vector<Bar>> series);
 
 }  // namespace qe

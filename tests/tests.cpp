@@ -33,8 +33,8 @@ int failures = 0;
 
 bool near(double a, double b, double eps = 1e-6) { return std::abs(a - b) < eps; }
 
-qe::Bar bar(const std::string& date, double open, double close) {
-    return {"TEST", date, open, std::max(open, close), std::min(open, close), close, 1000};
+qe::Bar bar(const std::string& date, double open, double close, const std::string& symbol = "TEST") {
+    return {symbol, date, open, std::max(open, close), std::min(open, close), close, 1000};
 }
 
 const qe::CostModel kFree{0.0, 0.0, 0.0};
@@ -185,6 +185,136 @@ void test_csv_loading() {
     std::remove(path.c_str());
 }
 
+void test_adjusted_close() {
+    // A 2:1 split-style gap in Close that Adj Close already smooths out.
+    const std::string path = "qe_test_adj.csv";
+    {
+        std::ofstream f(path);
+        f << "Date,Open,High,Low,Close,Adj Close,Volume\n"
+             "2024-01-02,200,210,190,200,100,10\n"
+             "2024-01-03,102,104,100,102,102,10\n";
+    }
+    auto bars = qe::load_csv(path, "ABC");
+    CHECK(bars.size() == 2);
+    if (bars.size() == 2) {
+        CHECK(near(bars[0].close, 100.0));
+        CHECK(near(bars[0].open, 100.0));
+        CHECK(near(bars[0].high, 105.0));
+        CHECK(near(bars[0].low, 95.0));
+        CHECK(near(bars[1].close, 102.0));  // factor 1 when they match
+    }
+    std::remove(path.c_str());
+}
+
+void test_symbol_from_path() {
+    CHECK(qe::symbol_from_path("data/spy.csv") == "SPY");
+    CHECK(qe::symbol_from_path("/tmp/BRK-B.csv") == "BRK-B");
+    CHECK(qe::symbol_from_path("sample.csv") == "SAMPLE");
+}
+
+void test_merge_series() {
+    auto merged = qe::merge_series({
+        {bar("2024-01-01", 1, 1, "BBB"), bar("2024-01-03", 1, 1, "BBB")},
+        {bar("2024-01-01", 1, 1, "AAA"), bar("2024-01-02", 1, 1, "AAA")},
+    });
+    CHECK(merged.size() == 4);
+    if (merged.size() == 4) {
+        CHECK(merged[0].symbol == "AAA" && merged[0].date == "2024-01-01");
+        CHECK(merged[1].symbol == "BBB" && merged[1].date == "2024-01-01");
+        CHECK(merged[2].date == "2024-01-02");
+        CHECK(merged[3].date == "2024-01-03");
+    }
+    bool threw = false;
+    try {
+        qe::merge_series({{bar("2024-01-01", 1, 1, "AAA")}, {bar("2024-01-01", 1, 1, "AAA")}});
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// Buys `qty` of every symbol it sees on the first date.
+class BuyEverything : public qe::Strategy {
+public:
+    explicit BuyEverything(long qty) : qty_(qty) {}
+    std::string name() const override { return "BuyEverything"; }
+    void on_bar(const qe::Bar& b, qe::StrategyContext& ctx) override {
+        if (b.date == "2024-01-01") ctx.submit_order({b.symbol, qe::Side::Buy, qty_, b.date});
+    }
+
+private:
+    long qty_;
+};
+
+void test_multi_symbol_run() {
+    qe::BarSeriesFeed feed(qe::merge_series({
+        {bar("2024-01-01", 10, 10, "AAA"), bar("2024-01-02", 11, 12, "AAA"), bar("2024-01-03", 12, 13, "AAA")},
+        {bar("2024-01-01", 20, 20, "BBB"), bar("2024-01-02", 21, 22, "BBB"), bar("2024-01-03", 22, 24, "BBB")},
+    }));
+    BuyEverything strat(10);
+    qe::Portfolio pf(1'000);
+    qe::SimulatedBroker broker(kFree);
+    qe::Backtester bt(feed, strat, pf, broker);
+    bt.run();
+
+    CHECK(bt.bars_processed() == 6);
+    CHECK(pf.equity_curve().size() == 3);  // one point per date, not per bar
+    CHECK(pf.position("AAA") == 10);
+    CHECK(pf.position("BBB") == 10);
+    CHECK(near(pf.cash(), 1'000 - 10 * 11.0 - 10 * 21.0));
+    CHECK(near(pf.equity(), pf.cash() + 10 * 13.0 + 10 * 24.0));
+    if (pf.equity_curve().size() == 3) {
+        // Day 2 is recorded after both symbols have filled and closed.
+        CHECK(pf.equity_curve()[1].date == "2024-01-02");
+        CHECK(near(pf.equity_curve()[1].equity, pf.cash() + 10 * 12.0 + 10 * 22.0));
+    }
+}
+
+void test_same_day_buys_cannot_overspend() {
+    // Each order alone fits in the cash, both together do not.
+    qe::BarSeriesFeed feed(qe::merge_series({
+        {bar("2024-01-01", 10, 10, "AAA"), bar("2024-01-02", 10, 10, "AAA")},
+        {bar("2024-01-01", 10, 10, "BBB"), bar("2024-01-02", 10, 10, "BBB")},
+    }));
+    BuyEverything strat(60);
+    qe::Portfolio pf(1'000);
+    qe::SimulatedBroker broker(kFree);
+    qe::Backtester bt(feed, strat, pf, broker);
+    bt.run();
+
+    CHECK(bt.rejected_orders() == 1);
+    CHECK(pf.position("AAA") == 60);
+    CHECK(pf.position("BBB") == 0);
+    CHECK(pf.cash() >= 0);
+}
+
+void test_sma_crossover_per_symbol() {
+    // AAA trends up, BBB trends down: only AAA should be bought, with half
+    // of the allocation.
+    std::vector<qe::Bar> up, down;
+    for (int i = 0; i < 20; ++i) {
+        char date[32];
+        std::snprintf(date, sizeof date, "2024-01-%02d", i + 1);
+        up.push_back(bar(date, 100 + i, 100 + i, "AAA"));
+        down.push_back(bar(date, 100 - i, 100 - i, "BBB"));
+    }
+    qe::BarSeriesFeed feed(qe::merge_series({up, down}));
+    qe::SmaCrossover strat(2, 4, 1.0, 2);
+    qe::Portfolio pf(10'000);
+    qe::SimulatedBroker broker(kFree);
+    qe::Backtester bt(feed, strat, pf, broker);
+    bt.run();
+
+    CHECK(pf.position("BBB") == 0);
+    CHECK(pf.position("AAA") > 0);
+    if (!pf.fills().empty()) {
+        const auto& f = pf.fills()[0];
+        CHECK(f.symbol == "AAA");
+        CHECK(f.quantity * f.price <= 5'000 + 1e-9 + f.price);  // ~half the equity
+        CHECK(f.quantity * f.price > 4'500);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -197,6 +327,12 @@ int main() {
         {"SMA crossover trades", test_sma_crossover_trades},
         {"metrics", test_metrics},
         {"CSV loading", test_csv_loading},
+        {"adjusted close", test_adjusted_close},
+        {"symbol from file name", test_symbol_from_path},
+        {"merge series", test_merge_series},
+        {"multi-symbol run", test_multi_symbol_run},
+        {"same-day buys can't overspend", test_same_day_buys_cannot_overspend},
+        {"SMA crossover per symbol", test_sma_crossover_per_symbol},
     };
     for (const auto& [name, fn] : tests) {
         const int before = failures;

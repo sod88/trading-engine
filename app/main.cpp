@@ -1,7 +1,12 @@
 // Command-line backtest runner.
 //
-//   backtest <data.csv> [--symbol SPY] [--fast 20] [--slow 50] [--cash 100000]
-//            [--commission 0.005] [--slippage-bps 1] [--out results] [--verbose]
+//   backtest <data.csv> [more.csv ...] [--symbol SPY] [--fast 20] [--slow 50]
+//            [--cash 100000] [--commission 0.005] [--slippage-bps 1]
+//            [--out results] [--verbose]
+//
+// Each file holds one symbol, named after the file (SPY.csv -> SPY) unless
+// --symbol is given for a single file. With several files the strategy
+// splits its allocation equally between them.
 
 #include <cstdlib>
 #include <filesystem>
@@ -9,6 +14,7 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "qe/broker.hpp"
 #include "qe/data_feed.hpp"
@@ -20,8 +26,8 @@
 namespace {
 
 struct Options {
-    std::string data_path;
-    std::string symbol = "SAMPLE";
+    std::vector<std::string> data_paths;
+    std::string symbol;  // only valid with a single file
     std::size_t fast = 20;
     std::size_t slow = 50;
     double cash = 100'000.0;
@@ -32,7 +38,7 @@ struct Options {
 
 [[noreturn]] void usage(const char* argv0) {
     std::cerr << "usage: " << argv0
-              << " <data.csv> [--symbol NAME] [--fast N] [--slow N] [--cash AMOUNT]\n"
+              << " <data.csv> [more.csv ...] [--symbol NAME] [--fast N] [--slow N] [--cash AMOUNT]\n"
                  "                 [--commission PER_SHARE] [--slippage-bps BPS] [--out DIR] [--verbose]\n";
     std::exit(2);
 }
@@ -55,9 +61,13 @@ Options parse_args(int argc, char** argv) {
         else if (arg == "--verbose" || arg == "-v") opt.verbose = true;
         else if (arg == "--help" || arg == "-h") usage(argv[0]);
         else if (!arg.empty() && arg[0] == '-') usage(argv[0]);
-        else opt.data_path = arg;
+        else opt.data_paths.push_back(arg);
     }
-    if (opt.data_path.empty()) usage(argv[0]);
+    if (opt.data_paths.empty()) usage(argv[0]);
+    if (!opt.symbol.empty() && opt.data_paths.size() > 1) {
+        std::cerr << "--symbol only works with a single data file; symbols come from file names\n";
+        std::exit(2);
+    }
     return opt;
 }
 
@@ -80,11 +90,21 @@ void write_outputs(const std::string& dir, const qe::Portfolio& pf) {
 int main(int argc, char** argv) {
     const Options opt = parse_args(argc, argv);
     try {
-        auto bars = qe::load_csv(opt.data_path, opt.symbol);
-        const double buy_and_hold = bars.back().close / bars.front().close - 1.0;
+        std::vector<std::vector<qe::Bar>> series;
+        std::vector<std::string> symbols;
+        double buy_and_hold = 0.0;  // equal-weight, each symbol over its own history
+        for (const auto& path : opt.data_paths) {
+            const std::string symbol = opt.symbol.empty() ? qe::symbol_from_path(path) : opt.symbol;
+            auto bars = qe::load_csv(path, symbol);
+            buy_and_hold += (bars.back().close / bars.front().close - 1.0) / static_cast<double>(opt.data_paths.size());
+            std::cout << "Loaded " << bars.size() << " bars of " << symbol << " (" << bars.front().date
+                      << " .. " << bars.back().date << ")\n";
+            symbols.push_back(symbol);
+            series.push_back(std::move(bars));
+        }
 
-        qe::BarSeriesFeed feed(std::move(bars));
-        qe::SmaCrossover strategy(opt.fast, opt.slow);
+        qe::BarSeriesFeed feed(qe::merge_series(std::move(series)));
+        qe::SmaCrossover strategy(opt.fast, opt.slow, 0.95, symbols.size());
         qe::Portfolio portfolio(opt.cash);
         qe::SimulatedBroker broker(opt.costs);
 
@@ -94,7 +114,9 @@ int main(int argc, char** argv) {
 
         auto report = qe::compute_report(portfolio);
         report.benchmark_return = buy_and_hold;
-        qe::print_report(std::cout, strategy.name() + " on " + opt.symbol, report);
+        std::string universe;
+        for (const auto& sym : symbols) universe += (universe.empty() ? "" : ", ") + sym;
+        qe::print_report(std::cout, strategy.name() + " on " + universe, report);
         if (bt.rejected_orders() > 0)
             std::cout << "  (" << bt.rejected_orders() << " orders rejected by risk checks)\n";
         if (broker.pending() > 0)

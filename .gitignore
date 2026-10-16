@@ -5,3 +5,7 @@ results/
 .vscode/
 .idea/
 __pycache__/
+
+# Downloaded market data; only the synthetic sample is committed
+data/*
+!data/sample.csv

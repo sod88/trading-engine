@@ -25,6 +25,7 @@ public:
     std::vector<Fill> on_bar(const Bar& bar);
 
     std::size_t pending() const { return pending_.size(); }
+    const std::vector<Order>& pending_orders() const { return pending_; }
     const CostModel& costs() const { return costs_; }
 
 private:

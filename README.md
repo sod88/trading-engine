@@ -13,14 +13,24 @@ ctest --test-dir build --output-on-failure     # or ./build/qe_tests
 ./build/backtest data/sample.csv
 ./build/backtest data/sample.csv --fast 10 --slow 30 --verbose
 ./build/backtest data/SPY.csv data/QQQ.csv data/TLT.csv   # several symbols
+./build/backtest data/sample.csv --strategy rsi --rsi-period 14 --rsi-entry 30 --rsi-exit 50
 ```
 
 On Windows with Visual Studio the executables land in `build\Release\`.
 
 Pass one CSV per symbol. Each symbol is named after its file (`SPY.csv` ->
 `SPY`); `--symbol NAME` overrides that when there is a single file.
-Options: `--symbol NAME`, `--fast N`, `--slow N`, `--cash AMOUNT`,
+Options: `--symbol NAME`, `--strategy sma|rsi`, `--cash AMOUNT`,
 `--commission PER_SHARE`, `--slippage-bps BPS`, `--out DIR`, `--verbose`.
+
+Strategies:
+
+- `sma` (default): moving-average crossover, trend following.
+  `--fast N` (20), `--slow N` (50).
+- `rsi`: RSI mean reversion. Buys when RSI drops below the entry level,
+  sells when it climbs back above the exit level.
+  `--rsi-period N` (14), `--rsi-entry LEVEL` (30), `--rsi-exit LEVEL` (50).
+
 Each run writes `equity.csv` and `trades.csv` to the output directory
 (`results/` by default) so you can chart them in Python, Excel, anything.
 
@@ -74,8 +84,9 @@ explicitly.
 | `include/qe/event.hpp` | `Bar`, `Order`, `Fill` and the event variant |
 | `include/qe/data_feed.hpp`, `src/data_feed.cpp` | data feeds, the CSV loader, merging symbols |
 | `include/qe/strategy.hpp` | `Strategy` and `StrategyContext` interfaces |
-| `include/qe/strategies/sma_crossover.hpp` | the sample strategy |
-| `include/qe/indicators.hpp` | incremental indicators (`RollingMean`) |
+| `include/qe/strategies/sma_crossover.hpp` | trend-following sample strategy |
+| `include/qe/strategies/rsi_mean_reversion.hpp` | mean-reversion sample strategy |
+| `include/qe/indicators.hpp` | incremental indicators (`RollingMean`, `Rsi`) |
 | `include/qe/portfolio.hpp`, `src/portfolio.cpp` | cash, positions, P&L, risk checks |
 | `include/qe/broker.hpp`, `src/broker.cpp` | simulated execution and costs |
 | `include/qe/engine.hpp`, `src/engine.cpp` | the event loop |
@@ -96,8 +107,8 @@ public:
 ```
 
 Strategies receive every symbol's bars through the same `on_bar`, so keep
-any per-symbol state keyed by `bar.symbol` (see `SmaCrossover`). Then swap it
-in for `SmaCrossover` in `app/main.cpp`.
+any per-symbol state keyed by `bar.symbol` (see `SmaCrossover`). Then add a
+branch for it to `make_strategy()` in `app/main.cpp`.
 
 ## Phase 1 limitations (on purpose)
 

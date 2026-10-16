@@ -17,6 +17,7 @@
 #include "qe/indicators.hpp"
 #include "qe/metrics.hpp"
 #include "qe/portfolio.hpp"
+#include "qe/strategies/rsi_mean_reversion.hpp"
 #include "qe/strategies/sma_crossover.hpp"
 
 namespace {
@@ -65,6 +66,25 @@ void test_rolling_mean() {
     CHECK(near(m.value(), 2.0));
     m.push(10);  // window is now 2,3,10
     CHECK(near(m.value(), 5.0));
+}
+
+void test_rsi() {
+    qe::Rsi r(2);
+    r.push(10);
+    r.push(12);  // +2
+    CHECK(!r.ready());
+    r.push(11);  // -1: seed avg gain 1, avg loss 0.5
+    CHECK(r.ready());
+    CHECK(near(r.value(), 100.0 - 100.0 / 3.0));
+    r.push(9);   // -2: Wilder -> gain 0.5, loss 1.25
+    CHECK(near(r.value(), 100.0 - 100.0 / (1.0 + 0.4)));
+
+    qe::Rsi up(3);
+    for (double p : {1.0, 2.0, 3.0, 4.0}) up.push(p);
+    CHECK(near(up.value(), 100.0));  // only gains
+    qe::Rsi flat(3);
+    for (int i = 0; i < 4; ++i) flat.push(5.0);
+    CHECK(near(flat.value(), 50.0));  // no movement at all
 }
 
 void test_no_look_ahead() {
@@ -151,6 +171,40 @@ void test_sma_crossover_trades() {
     }
     CHECK(pf.position("TEST") == 0);
     CHECK(bt.rejected_orders() == 0);
+}
+
+void test_rsi_mean_reversion_trades() {
+    // Flat-ish, a sharp sell-off (oversold -> buy), then a rebound (-> sell).
+    std::vector<double> closes;
+    for (int i = 0; i < 10; ++i) closes.push_back(100 + (i % 2));
+    for (int i = 0; i < 6; ++i) closes.push_back(98 - 3 * i);
+    for (int i = 0; i < 10; ++i) closes.push_back(85 + 3 * i);
+    std::vector<qe::Bar> bars;
+    for (std::size_t i = 0; i < closes.size(); ++i) {
+        char date[32];
+        std::snprintf(date, sizeof date, "2024-01-%02zu", i + 1);
+        bars.push_back(bar(date, closes[i], closes[i]));
+    }
+    qe::BarSeriesFeed feed(bars);
+    qe::RsiMeanReversion strat(5, 30, 50);
+    qe::Portfolio pf(10'000);
+    qe::SimulatedBroker broker(kFree);
+    qe::Backtester bt(feed, strat, pf, broker);
+    bt.run();
+
+    const auto& fills = pf.fills();
+    CHECK(fills.size() == 2);
+    if (fills.size() == 2) {
+        CHECK(fills[0].side == qe::Side::Buy);
+        CHECK(fills[1].side == qe::Side::Sell);
+        CHECK(fills[1].price > fills[0].price);  // bought the dip, sold the bounce
+    }
+    CHECK(pf.position("TEST") == 0);
+    CHECK(bt.rejected_orders() == 0);
+
+    bool threw = false;
+    try { qe::RsiMeanReversion bad(14, 60, 40); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
 }
 
 void test_metrics() {
@@ -315,16 +369,45 @@ void test_sma_crossover_per_symbol() {
     }
 }
 
+void test_rsi_mean_reversion_per_symbol() {
+    // AAA keeps falling (oversold), BBB keeps rising: only AAA should be
+    // bought, with half of the allocation.
+    std::vector<qe::Bar> falling, rising;
+    for (int i = 0; i < 20; ++i) {
+        char date[32];
+        std::snprintf(date, sizeof date, "2024-01-%02d", i + 1);
+        falling.push_back(bar(date, 100 - i, 100 - i, "AAA"));
+        rising.push_back(bar(date, 100 + i, 100 + i, "BBB"));
+    }
+    qe::BarSeriesFeed feed(qe::merge_series({falling, rising}));
+    qe::RsiMeanReversion strat(3, 30, 50, 1.0, 2);
+    qe::Portfolio pf(10'000);
+    qe::SimulatedBroker broker(kFree);
+    qe::Backtester bt(feed, strat, pf, broker);
+    bt.run();
+
+    CHECK(pf.position("BBB") == 0);
+    CHECK(pf.position("AAA") > 0);
+    if (!pf.fills().empty()) {
+        const auto& f = pf.fills()[0];
+        CHECK(f.symbol == "AAA");
+        CHECK(f.quantity * f.price <= 5'000 + 1e-9 + f.price);  // ~half the equity
+        CHECK(f.quantity * f.price > 4'500);
+    }
+}
+
 }  // namespace
 
 int main() {
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
         {"rolling mean", test_rolling_mean},
+        {"RSI", test_rsi},
         {"no look-ahead", test_no_look_ahead},
         {"costs and slippage", test_costs_and_slippage},
         {"portfolio P&L", test_portfolio_pnl},
         {"risk checks", test_risk_checks},
         {"SMA crossover trades", test_sma_crossover_trades},
+        {"RSI mean reversion trades", test_rsi_mean_reversion_trades},
         {"metrics", test_metrics},
         {"CSV loading", test_csv_loading},
         {"adjusted close", test_adjusted_close},
@@ -333,6 +416,7 @@ int main() {
         {"multi-symbol run", test_multi_symbol_run},
         {"same-day buys can't overspend", test_same_day_buys_cannot_overspend},
         {"SMA crossover per symbol", test_sma_crossover_per_symbol},
+        {"RSI mean reversion per symbol", test_rsi_mean_reversion_per_symbol},
     };
     for (const auto& [name, fn] : tests) {
         const int before = failures;

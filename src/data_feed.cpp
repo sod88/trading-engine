@@ -77,9 +77,7 @@ std::vector<Bar> load_csv(const std::string& path, const std::string& symbol) {
 
     std::vector<Bar> bars;
     std::size_t skipped = 0;
-    std::size_t line_no = 1;
     while (std::getline(in, line)) {
-        ++line_no;
         if (trim(line).empty()) continue;
         auto cells = split(line);
         auto get = [&](std::size_t c) -> std::optional<double> {
